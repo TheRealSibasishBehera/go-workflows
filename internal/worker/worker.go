@@ -25,7 +25,8 @@ type TaskWorker[Task, Result any] interface {
 type Worker[Task, TaskResult any] struct {
 	options *WorkerOptions
 
-	tw TaskWorker[Task, TaskResult]
+	backend backend.Backend
+	tw      TaskWorker[Task, TaskResult]
 
 	taskQueue *workQueue[Task]
 
@@ -62,6 +63,7 @@ func NewWorker[Task, TaskResult any](
 	}
 
 	return &Worker[Task, TaskResult]{
+		backend:        b,
 		tw:             tw,
 		options:        options,
 		taskQueue:      newWorkQueue[Task](options.MaxParallelTasks),
@@ -107,6 +109,16 @@ func (w *Worker[Task, TaskResult]) poller(ctx context.Context) {
 		defer ticker.Stop()
 	}
 
+	var readyChan <-chan struct{}
+	if n, ok := w.backend.(backend.Notifier); ok {
+		switch any(w.tw).(type) {
+		case *ActivityTaskWorker:
+			readyChan = n.ActivityTaskReady()
+		case *WorkflowTaskWorker:
+			readyChan = n.WorkflowTaskReady()
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -140,8 +152,22 @@ func (w *Worker[Task, TaskResult]) poller(ctx context.Context) {
 			w.taskQueue.release()
 		}
 
-		// Optionally wait between unsuccessful polling attempts
-		if w.options.PollingInterval > 0 {
+		if readyChan != nil {
+			if ticker != nil {
+				select {
+				case <-readyChan:
+				case <-ticker.C:
+				case <-ctx.Done():
+					return
+				}
+			} else {
+				select {
+				case <-readyChan:
+				case <-ctx.Done():
+					return
+				}
+			}
+		} else if w.options.PollingInterval > 0 {
 			select {
 			case <-ticker.C:
 			case <-ctx.Done():

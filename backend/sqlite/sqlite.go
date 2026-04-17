@@ -91,6 +91,11 @@ func newSqliteBackend(dsn string, opts ...option) *sqliteBackend {
 		ownsConnection: true,
 	}
 
+	if options.NotifierEnabled {
+		b.workflowReady = make(chan struct{}, 1)
+		b.activityReady = make(chan struct{}, 1)
+	}
+
 	// Apply migrations
 	if options.ApplyMigrations {
 		if err := b.Migrate(); err != nil {
@@ -124,6 +129,11 @@ func NewSqliteBackendWithDB(db *sql.DB, opts ...option) *sqliteBackend {
 		ownsConnection: false,
 	}
 
+	if options.NotifierEnabled {
+		b.workflowReady = make(chan struct{}, 1)
+		b.activityReady = make(chan struct{}, 1)
+	}
+
 	if options.ApplyMigrations {
 		if err := b.Migrate(); err != nil {
 			panic(err)
@@ -140,9 +150,14 @@ type sqliteBackend struct {
 	ownsConnection bool
 
 	memConn *sql.Conn
+
+	workflowReady chan struct{}
+	activityReady chan struct{}
 }
 
 var _ backend.Backend = (*sqliteBackend)(nil)
+
+var _ backend.Notifier = (*sqliteBackend)(nil)
 
 func (sb *sqliteBackend) FeatureSupported(feature backend.Feature) bool {
 	return true
@@ -160,6 +175,24 @@ func (sb *sqliteBackend) Close() error {
 	}
 
 	return sb.db.Close()
+}
+
+func (sb *sqliteBackend) WorkflowTaskReady() <-chan struct{} {
+	return sb.workflowReady
+}
+
+func (sb *sqliteBackend) ActivityTaskReady() <-chan struct{} {
+	return sb.activityReady
+}
+
+func (sb *sqliteBackend) notify(ch chan struct{}) {
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
 }
 
 // Migrate applies any pending database migrations.
@@ -225,6 +258,8 @@ func (sb *sqliteBackend) CreateWorkflowInstance(ctx context.Context, instance *w
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("creating workflow instance: %w", err)
 	}
+
+	sb.notify(sb.workflowReady)
 
 	return nil
 }
@@ -407,7 +442,13 @@ func (sb *sqliteBackend) CancelWorkflowInstance(ctx context.Context, instance *w
 		return fmt.Errorf("inserting cancellation event: %w", err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	sb.notify(sb.workflowReady)
+
+	return nil
 }
 
 func (sb *sqliteBackend) GetWorkflowInstanceHistory(ctx context.Context, instance *workflow.Instance, lastSequenceID *int64) ([]*history.Event, error) {
@@ -471,7 +512,13 @@ func (sb *sqliteBackend) SignalWorkflow(ctx context.Context, instanceID string, 
 		return fmt.Errorf("inserting signal event: %w", err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	sb.notify(sb.workflowReady)
+
+	return nil
 }
 
 func (sb *sqliteBackend) PrepareWorkflowQueues(ctx context.Context, queues []workflow.Queue) error {
@@ -735,7 +782,17 @@ func (sb *sqliteBackend) CompleteWorkflowTask(
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	if len(activityEvents) > 0 {
+		sb.notify(sb.activityReady)
+	}
+
+	sb.notify(sb.workflowReady)
+
+	return nil
 }
 
 func (sb *sqliteBackend) ExtendWorkflowTask(ctx context.Context, task *backend.WorkflowTask) error {
@@ -884,7 +941,13 @@ func (sb *sqliteBackend) CompleteActivityTask(ctx context.Context, task *backend
 		return fmt.Errorf("inserting new events for completed activity: %w", err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	sb.notify(sb.workflowReady)
+
+	return nil
 }
 
 func (sb *sqliteBackend) ExtendActivityTask(ctx context.Context, task *backend.ActivityTask) error {
