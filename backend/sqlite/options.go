@@ -9,6 +9,9 @@ type options struct {
 
 	// ApplyMigrations automatically applies database migrations on startup.
 	ApplyMigrations bool
+
+	// NotifierEnabled enables push-based notification channels for task readiness.
+	NotifierEnabled bool
 }
 
 type option func(*options)
@@ -17,6 +20,13 @@ type option func(*options)
 func WithApplyMigrations(applyMigrations bool) option {
 	return func(o *options) {
 		o.ApplyMigrations = applyMigrations
+	}
+}
+
+// WithNotifierEnabled enables push-based notification channels for task readiness.
+func WithNotifierEnabled() option {
+	return func(o *options) {
+		o.NotifierEnabled = true
 	}
 }
 
